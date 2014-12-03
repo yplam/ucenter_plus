@@ -1,0 +1,11 @@
+name = UCenter OAuth Server
+description = Allows users to login to other sites through your site using OAuth2.
+package = "Authentication"
+core = 7.x
+version = "7.x-1.0"
+
+dependencies[] = services
+dependencies[] = oauth2_server
+dependencies[] = features
+
+

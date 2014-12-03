@@ -1,0 +1,10 @@
+name = "UCenter Plus Connect"
+description = "UCenter Plus connect with 3rd OAuth2 Servers."
+core = "7.x"
+package = "Authentication"
+version = "7.x-1.0"
+
+dependencies[] = ctools
+dependencies[] = ucenter_plus
+
+configure = admin/config/people/upc/config

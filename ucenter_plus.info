@@ -1,0 +1,7 @@
+name = "UCenter Plus"
+description = "UCenter Plus connect with comsenz ucenter and provide some common user function."
+core = "7.x"
+package = "Authentication"
+version = "7.x-1.0"
+
+configure = admin/config/people/ucenterplus/config

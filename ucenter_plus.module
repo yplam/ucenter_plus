@@ -1,0 +1,548 @@
+<?php
+/**
+ * @file UCenter Plus
+ * 
+ * ucenter 整合
+ *
+ * 关于ucenter整合
+ * ucenter整合均通过mysql的方式
+ * 使用ucenter_plus_ucapi.inc中的实现来响应所有ucenter服务器发过来的请求，如同步登陆、退出
+ * 更改用户注册、编辑、登陆form的实现，将本站内容与ucenter整合
+ * 由于user_save中对密码进行了加密，因此所有的hook_user_*得到的均不是原始用户输入的密码
+ * 为了能传递密码数据到ucenter，我们将尽量不实现hook_user_*，而是通过form_alter的方式来提交数据
+ */
+
+
+/*
+define('DISABLE_UCENTER_PLUS', TRUE);
+*/
+
+function ucenter_plus_use_ucenter(){
+  if(defined('DISABLE_UCENTER_PLUS')){
+    return false;
+  }
+  return (int)variable_get('ucenter_plus_config_use', 0);
+}
+
+function ucenter_plus_menu() {
+  if(ucenter_plus_use_ucenter()){
+    $items['ucp/api/uc'] = array(
+      'title' => 'Ucenter API',
+      'access callback' => TRUE,
+      'page callback' => 'ucenter_plus_ucapi',
+      'type' => MENU_CALLBACK,
+      'file' => 'ucenter_plus_ucapi.inc',
+    );
+  }
+  $items['admin/config/people/ucenterplus'] = array(
+    'title' => '配置UCenter Plus',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('ucenter_plus_admin_settings'),
+    'access arguments' => array('administer ucenter plus'),
+    'type' => MENU_NORMAL_ITEM,
+    'file' => 'ucenter_plus.admin.inc',
+    'description' => '配置UCenter Plus参数',
+    'position' => 'left',
+  );
+  $items['admin/config/people/ucenterplus/config'] = array(
+    'title' => '配置UCenter Plus',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -1,
+  );
+  $items['test'] = array(
+    'title' => 'Ucenter API',
+    'access callback' => TRUE,
+    'page callback' => '_ucenter_plus_test',
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+function _ucenter_plus_test(){
+  dsm(ucenter_plus_connect_get_clients());
+  return '';
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function ucenter_plus_form_alter(&$form, &$form_state, $form_id) {
+  switch ($form_id) {
+    case 'user_login_block':
+      if(ucenter_plus_use_ucenter()){
+        array_unshift($form['#validate'], '_ucenter_plus_login_validate');
+      }
+      break;
+
+    case 'user_login':
+      if(ucenter_plus_use_ucenter()){
+        array_unshift($form['#validate'], '_ucenter_plus_login_validate');
+      }
+      break;
+    case 'user_register_form' :
+
+      if(ucenter_plus_use_ucenter()){
+
+        $form['#validate'][] = '_ucenter_plus_register_validate';
+        // 接管Drupal注册流程提交
+        $key = array_search('user_register_submit', $form['#submit']);
+        if($key !== FALSE){
+          unset($form['#submit'][$key]);
+        }
+        $form['#submit'][] = '_ucenter_plus_register_submit';
+      }
+      break;
+    case 'user_profile_form' :
+      if(ucenter_plus_use_ucenter()){
+        $form['#validate'][] = '_ucenter_plus_profile_form_validate';
+        $form['#submit'][] = '_ucenter_plus_profile_form_submit';
+      }
+      break;
+    case 'user_pass' :
+      if(ucenter_plus_use_ucenter()){
+        array_unshift($form['#validate'], '_ucenter_plus_pass_validate');
+      }
+      break;
+  }
+}
+
+
+/**
+ * hook_user_delete 删除ucenter对应用户
+ */
+function ucenter_plus_user_delete($account) {
+  ucenter_plus_ucenter_init();
+  uc_user_delete(ucenter_plus_to_string($account->name));
+}
+
+
+/*******************************************************************************
+ * ucenter 相关功能
+ ******************************************************************************/
+/*
+ * 初始化ucenter功能
+ */
+function _ucenter_plus_init(){
+  $isset = &drupal_static(__FUNCTION__);
+  if (!isset($isset)) {
+    $isset = true;
+    define('UC_CONNECT', 'mysql');
+    define('UC_DBHOST', variable_get('ucenter_plus_config_host', ""));
+    define('UC_DBUSER', variable_get('ucenter_plus_config_user', ""));
+    define('UC_DBPW', variable_get('ucenter_plus_config_pass', ""));
+    define('UC_DBNAME', variable_get('ucenter_plus_config_name', ""));
+    define('UC_DBCHARSET', variable_get('ucenter_plus_config_charset', "utf8"));
+    define('UC_DBTABLEPRE', variable_get('ucenter_plus_config_pre', ""));
+    define('UC_DBCONNECT', '0');
+    define('UC_KEY', variable_get('ucenter_plus_config_key', ""));
+    define('UC_API', variable_get('ucenter_plus_config_api', ""));
+    define('UC_CHARSET', variable_get('ucenter_plus_config_charset', ""));
+    define('UC_IP', variable_get('ucenter_plus_config_ip', ""));
+    define('UC_APPID', variable_get('ucenter_plus_config_appid', ""));
+    define('UC_PPP', variable_get('ucenter_plus_config_ppp', ""));
+    define('UC_DATADIR', variable_get('file_public_path', conf_path() . '/files') .'/ucenter_plus/data/');
+
+    define('UC_API_RETURN_SUCCEED', '1');
+    define('UC_API_RETURN_FAILED', '-1');
+    define('UC_API_RETURN_FORBIDDEN', '-2');
+    require_once drupal_get_path('module', 'ucenter_plus') . '/uc_client/client.php';
+  }
+}
+
+
+/**
+ * get string from ucenter,may contain gbk
+ */
+function _ucenter_plus_from_string($str){
+  if (defined('UC_CHARSET') && UC_CHARSET=='gbk') {
+    $str =  mb_convert_encoding($str,"UTF-8","GB2312");
+  }
+  return $str;
+}
+
+/**
+ * send string to ucenter
+ */
+function _ucenter_plus_to_string($str) {
+  if (defined('UC_CHARSET') && UC_CHARSET=='gbk') {
+    $str =  mb_convert_encoding($str,"GB2312","UTF-8");
+  }
+  return $str;
+}
+
+/**
+ * user_save 的UCenter Plus版本，提供账号创建与绑定功能，用于创建用户
+ * name, mail, ucuid 为必填
+ */
+ 
+function _ucenter_plus_user_create($edit = array(), $category="ucenter_plus") {
+  // 下面三项为必填
+  if( empty($edit['name']) || empty($edit['mail']) || empty($edit['ucuid']) ){
+    return FALSE;
+  }
+  $edit['name'] = trim($edit['name']);
+  $edit['mail'] = trim($edit['mail']);
+  $ucuid = (int)$edit['ucuid'];
+  unset($edit['ucuid']);
+  
+  // 如果用户已存在，则无法创建
+  if(user_load_by_name($edit['name'])
+    || user_load($ucuid)
+    || user_load_by_mail($edit['mail'])
+  ){
+    return FALSE;
+  }
+  //密码初始化
+  if(empty($edit['pass'])){
+    $edit['pass'] = user_password();
+  }
+  if(empty($edit['init'])){
+    $edit['init'] = $edit['mail'];
+  }
+  if(!isset($edit['status'])){
+    $edit['status'] = TRUE;
+  }
+
+  
+  $transaction = db_transaction();
+  try {
+    // Allow alternate password hashing schemes.
+    require_once DRUPAL_ROOT . '/' . variable_get('password_inc', 'includes/password.inc');
+    $edit['pass'] = user_hash_password(trim($edit['pass']));
+    // Abort if the hashing failed and returned FALSE.
+    if (!$edit['pass']) {
+      return FALSE;
+    }
+
+
+    $account = new stdClass();
+
+    $account->is_new = TRUE;
+ 
+    // Invoke hook_user_presave() for all modules.
+    user_module_invoke('presave', $edit, $account, $category);
+
+    // Invoke presave operations of Field Attach API and Entity API. Those APIs
+    // require a fully-fledged and updated entity object. Therefore, we need to
+    // copy any new property values of $edit into it.
+    foreach ($edit as $key => $value) {
+      $account->$key = $value;
+    }
+    field_attach_presave('user', $account);
+    module_invoke_all('entity_presave', $account, 'user');
+
+    
+    $account->uid = $ucuid;
+
+    if (!isset($account->created)) {
+      $account->created = REQUEST_TIME;
+    }
+    $success = drupal_write_record('users', $account);
+    if ($success === FALSE) {
+      // On a failed INSERT some other existing user's uid may be returned.
+      // We must abort to avoid overwriting their account.
+      return FALSE;
+    }
+
+    // Make sure $account is properly initialized.
+    $account->roles[DRUPAL_AUTHENTICATED_RID] = 'authenticated user';
+
+    field_attach_insert('user', $account);
+    $edit = (array) $account;
+    user_module_invoke('insert', $edit, $account, $category);
+    module_invoke_all('entity_insert', $account, 'user');
+
+    // Save user roles. Skip built-in roles, and ones that were already saved
+    // to the database during hook calls.
+    $rids_to_skip = array_merge(array(DRUPAL_ANONYMOUS_RID, DRUPAL_AUTHENTICATED_RID), db_query('SELECT rid FROM {users_roles} WHERE uid = :uid', array(':uid' => $account->uid))->fetchCol());
+    if ($rids_to_save = array_diff(array_keys($account->roles), $rids_to_skip)) {
+      $query = db_insert('users_roles')->fields(array('uid', 'rid'));
+      foreach ($rids_to_save as $rid) {
+        $query->values(array(
+          'uid' => $account->uid,
+          'rid' => $rid,
+        ));
+      }
+      $query->execute();
+    }
+    // Clear internal properties.
+    unset($account->is_new);
+    unset($account->original);
+    // Clear the static loading cache.
+    entity_get_controller('user')->resetCache(array($account->uid));
+
+    return $account;
+  }
+  catch (Exception $e) {
+    $transaction->rollback();
+    watchdog_exception('user', $e);
+    throw $e;
+  }
+}
+
+/**
+ * 登陆校验
+ */
+function _ucenter_plus_login_validate ($form, &$form_state) {
+  _ucenter_plus_init();
+  global $user;
+
+  @list($ucuid, $ucname, $ucpass, $ucmail) = uc_user_login(_ucenter_plus_to_string($form_state['values']['name']), _ucenter_plus_to_string($form_state['values']['pass']));
+  if ($ucuid > 0) {
+
+    $account= user_load($ucuid);
+    
+    // 如果不存在，则尝试创建
+    if (!$account) {
+      $edit = array(
+        'name' => _ucenter_plus_from_string($ucname),
+        'mail' => _ucenter_plus_from_string($ucmail),
+        'pass' => $form_state['values']['pass'],
+        'ucuid' => _ucenter_plus_from_string($ucuid)
+      );
+      $account = _ucenter_plus_user_create($edit);
+    }
+    // 如果用户存在，则按照ucenter提供的密码更新Drupal数据，这样才可以通过Drupal的用户登陆验证
+    if ($account) {
+      // 不用user_save，避免运行hook，同时也避免干扰其他功能
+      require_once DRUPAL_ROOT . '/' . variable_get('password_inc', 'includes/password.inc');
+      $update_user = new stdClass();
+      $update_user->changed = false;
+      $update_user->uid = $account->uid;
+      
+      $cur_pass = user_hash_password(trim($form_state['values']['pass']));
+      if($cur_pass && $cur_pass != $account->pass){
+        $update_user->pass = $cur_pass;
+        $update_user->changed = true;
+      }
+      // 防止旧用户名修改没有同步
+      if(trim($form_state['values']['name']) != $account->name){
+        $update_user->name = trim($form_state['values']['name']);
+        $update_user->changed = true;
+      }
+      // 如果用户名或者密码变化，则更新
+      if($update_user->changed){
+        unset($update_user->changed);
+        drupal_write_record('users', $update_user, 'uid');
+      }
+    }
+  }
+  else {
+    form_set_error('name', t('Sorry, unrecognized username or password. <a href="@password">Have you forgotten your password?</a>', array('@password' => url('user/password'))));
+  }
+}
+
+
+/**
+ * 注册校验
+ */
+function _ucenter_plus_register_validate ($form, &$form_state) {
+  _ucenter_plus_init();
+  $mail_status = uc_user_checkemail(_ucenter_plus_to_string($form_state['values']['mail']));
+  if ($mail_status == -5 || $mail_status == -4 ) {
+    form_set_error('mail', '电子邮箱格式错误，或者不允许注册');
+  }
+  else if($mail_status == -6) {
+    form_set_error('mail', '电子邮箱已被注册，您可以直接登陆或者找回密码。');
+  }
+
+  $name_status = uc_user_checkname(_ucenter_plus_to_string($form_state['values']['name']));
+  if ($name_status == -1 || $name_status == -2) {
+    form_set_error('name', '用户名不合法或者包含禁止词');
+  }
+  else if ($name_status == -3) {
+    form_set_error('name', '用户名已被注册，您可以直接登陆或者找回密码。');
+  }
+}
+
+function _ucenter_plus_register_submit ($form, &$form_state) {
+  global $user;
+  _ucenter_plus_init();
+  $admin = $form_state['values']['administer_users'];
+
+  if (!variable_get('user_email_verification', TRUE) || $admin) {
+    $pass = $form_state['values']['pass'];
+  }
+  else {
+    $pass = user_password();
+  }
+  $notify = !empty($form_state['values']['notify']);
+
+  // Remove unneeded values.
+  form_state_values_clean($form_state);
+
+  $form_state['values']['pass'] = $pass;
+  $form_state['values']['init'] = $form_state['values']['mail'];
+
+  $account = $form['#user'];
+
+  entity_form_submit_build_entity('user', $account, $form, $form_state);
+
+  // Populate $edit with the properties of $account, which have been edited on
+  // this form by taking over all values, which appear in the form values too.
+  $edit = array_intersect_key((array) $account, $form_state['values']);
+  // 先创建ucenter用户
+  $ucuid = uc_user_register(_ucenter_plus_to_string($edit['name']), _ucenter_plus_to_string($edit['pass']), _ucenter_plus_to_string($edit['mail']));
+  if($ucuid <= 0){
+    drupal_set_message(t("Error saving user account."), 'error');
+    $form_state['redirect'] = '';
+    return;
+  }
+  $edit['ucuid'] = $ucuid;
+  
+  $account = _ucenter_plus_user_create($edit);
+
+
+  // Terminate if an error occurred during user_save().
+  if (!$account) {
+    drupal_set_message(t("Error saving user account."), 'error');
+    $form_state['redirect'] = '';
+    return;
+  }
+  $form_state['user'] = $account;
+  $form_state['values']['uid'] = $account->uid;
+    // add authmap for ucenter_plus_connect
+  if(isset($form_state['values']['authmap_uid']) && isset($form_state['values']['authmap_client'])){
+    $identity = $form_state['values']['authmap_client'] . '_' . $form_state['values']['authmap_uid'];
+    user_set_authmaps($account, array('authname_upc' => $identity));
+  }
+
+  watchdog('user', 'New user: %name (%email).', array('%name' => $form_state['values']['name'], '%email' => $form_state['values']['mail']), WATCHDOG_NOTICE, l(t('edit'), 'user/' . $account->uid . '/edit'));
+
+  // Add plain text password into user account to generate mail tokens.
+  $account->password = $pass;
+
+  // New administrative account without notification.
+  $uri = entity_uri('user', $account);
+  if ($admin && !$notify) {
+    drupal_set_message(t('Created a new user account for <a href="@url">%name</a>. No e-mail has been sent.', array('@url' => url($uri['path'], $uri['options']), '%name' => $account->name)));
+  }
+  // No e-mail verification required; log in user immediately.
+  elseif (!$admin && !variable_get('user_email_verification', TRUE) && $account->status) {
+    _user_mail_notify('register_no_approval_required', $account);
+    $form_state['uid'] = $account->uid;
+    user_login_submit(array(), $form_state);
+    drupal_set_message(t('Registration successful. You are now logged in.'));
+    $form_state['redirect'] = '';
+  }
+  // No administrator approval required.
+  elseif ($account->status || $notify) {
+    $op = $notify ? 'register_admin_created' : 'register_no_approval_required';
+    _user_mail_notify($op, $account);
+    if ($notify) {
+      drupal_set_message(t('A welcome message with further instructions has been e-mailed to the new user <a href="@url">%name</a>.', array('@url' => url($uri['path'], $uri['options']), '%name' => $account->name)));
+    }
+    else {
+      drupal_set_message(t('A welcome message with further instructions has been sent to your e-mail address.'));
+      $form_state['redirect'] = '';
+    }
+  }
+  // Administrator approval required.
+  else {
+    _user_mail_notify('register_pending_approval', $account);
+    drupal_set_message(t('Thank you for applying for an account. Your account is currently pending approval by the site administrator.<br />In the meantime, a welcome message with further instructions has been sent to your e-mail address.'));
+    $form_state['redirect'] = '';
+  }
+}
+
+
+/**
+ * 编辑校验
+ */
+function _ucenter_plus_profile_form_validate ($form, &$form_state) {
+  _ucenter_plus_init();
+  $account = $form_state['user'];
+  $changed_name = empty($form_state['values']['name']) ? '' : trim($form_state['values']['name']);
+  $changed_mail = empty($form_state['values']['mail']) ? '' : trim($form_state['values']['mail']);
+  if($changed_name && $changed_name != $account->name ){
+    form_set_error('name', '对不起，不允许修改用户名.');
+  }
+  if($changed_mail && $changed_mail != $account->mail && 1 != uc_user_checkemail(_ucenter_plus_to_string($changed_mail))){
+    form_set_error('mail', '对不起，电子邮件地址已被注册.');
+  }
+
+}
+
+function _ucenter_plus_profile_form_submit ($form, &$form_state) {
+  _ucenter_plus_init();
+  $account = $form_state['user'];
+  @$status = uc_user_edit(_ucenter_plus_to_string($account->name), '', '', _ucenter_plus_to_string(trim($form_state['values']['mail'])), 1);
+  if(!empty($form_state['values']['pass'])){
+    // 无论是否存在关联，均尝试根据用户名进行修改
+    @$status = uc_user_edit(_ucenter_plus_to_string($account->name), '', _ucenter_plus_to_string(trim($form_state['values']['pass'])), '', 1);
+    if($status == 1){
+      watchdog('ucenter_plus', 'Change account pass');
+    }
+    else{
+      watchdog('ucenter_plus', 'Change account pass error '.$status);
+    }
+  }
+}
+
+/**
+ * 用户找回密码
+ * 有可能用户还没有在Drupal下注册，因此需要根据输入的用户名密码先生成ucenter用户
+ */
+function _ucenter_plus_pass_validate ($form, &$form_state) {
+  _ucenter_plus_init();
+  // 如果本站用户存在，则不需要经过ucenter
+  $name = trim($form_state['values']['name']);
+  $users = user_load_multiple(array(), array('mail' => $name, 'status' => '1'));
+  $account = reset($users);
+  if (!$account) {
+    // No success, try to load by name.
+    $users = user_load_multiple(array(), array('name' => $name, 'status' => '1'));
+    $account = reset($users);
+  }
+  if (isset($account->uid)) {
+    return;
+  }
+  
+  $ucname = _ucenter_plus_to_string($name);
+  @list($ucuid, $ucname, $ucmail) = uc_get_user($ucname);
+  if($ucuid){ // 用户存在，则创建新用户
+    $edit = array(
+      'name' => _ucenter_plus_from_string($ucname),
+      'mail' => _ucenter_plus_from_string($ucmail),
+      'ucuid' => _ucenter_plus_from_string($ucuid)
+    );
+    $ucuser = _ucenter_plus_user_create($edit);
+  }
+  else if(uc_user_checkemail(_ucenter_plus_from_string($name))==-6){
+    form_set_error('name', '对不起，您的账号请使用用户名重设密码。');
+  }
+}
+ 
+/*******************************************************************************
+ * API 调用
+ ******************************************************************************/
+/*
+ * 从UCenter同步某个用户的数据，如果用户不存在，则创建
+ */
+function ucenter_plus_sync_ucenter($uid){
+  _ucenter_plus_init();
+  $account = user_load((int)$uid);
+  list($ucuid, $name, $mail) = uc_get_user($uid, 1);
+  if(empty($ucuid)){
+    return FALSE;
+  }
+  $edit = array(
+    'name' => _ucenter_plus_from_string($name),
+    'mail' => _ucenter_plus_from_string($mail),
+    'ucuid' => _ucenter_plus_from_string($ucuid)
+  );
+  if(!$account){
+    $account = _ucenter_plus_user_create($edit);
+  }
+  
+  if(!$account){
+    return FALSE;
+  }
+  
+  unset($edit['ucuid']);
+  if (user_save($account, $edit, 'ucenter_plus')) {
+    return TRUE;
+  }
+  return FALSE;
+  
+}

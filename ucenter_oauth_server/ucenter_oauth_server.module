@@ -1,0 +1,220 @@
+<?php
+/**
+ * @file
+ * Module file for ucenter_oauth_server.
+ */
+
+/**
+ * Implements hook_ctools_plugin_api().
+ */
+function ucenter_oauth_server_ctools_plugin_api() {
+  list($module, $api) = func_get_args();
+  if ($module == "services" && $api == "services") {
+    return array("version" => "3");
+  }
+}
+
+function ucenter_oauth_server_menu() {
+  $items = array();
+  $items['hello'] = array(
+    'title' => t('User Login Status'),
+    'page callback' => 'ucenter_oauth_server_hello',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+function ucenter_oauth_server_hello() {
+  global $user;
+  echo $user->uid;
+  exit();
+}
+
+/**
+ * Implements hook_default_oauth2_server().
+ */
+function ucenter_oauth_server_default_oauth2_server() {
+  $items = array();
+  $items['oauth2'] = entity_import('oauth2_server', '{
+    "name" : "oauth2",
+    "label" : "OAuth2 Server",
+    "settings" : {
+      "enforce_state" : false,
+      "default_scope" : "user_profile",
+      "allow_implicit" : 1,
+      "grant_types" : {
+        "authorization_code" : "authorization_code",
+        "client_credentials" : "client_credentials",
+        "refresh_token" : "refresh_token",
+        "password" : "password"
+      },
+      "always_issue_new_refresh_token" : 1,
+      "access_lifetime" : "3600",
+      "refresh_token_lifetime" : "1209600",
+      "require_exact_redirect_uri" : 0
+    },
+    "rdf_mapping" : [],
+    "scopes" : [ { "name" : "user_profile", "description" : "Access to the User Profile", "rdf_mapping" : [] } ]
+  }');
+  return $items;
+}
+
+/**
+ * Implements hook_user_default_permissions().
+ */
+function ucenter_oauth_server_user_default_permissions() {
+  $permissions = array();
+
+  // Exported permission: use oauth2 server.
+  $permissions['use oauth2 server'] = array(
+    'name' => 'use oauth2 server',
+    'roles' => array(
+      0 => 'anonymous user',
+      1 => 'authenticated user',
+    ),
+    'module' => 'oauth2_server',
+  );
+
+  return $permissions;
+}
+
+/**
+ * Implements hook_default_services_endpoint().
+ */
+function ucenter_oauth_server_default_services_endpoint() {
+  $endpoints = array();
+
+  $endpoint = new stdClass();
+  $endpoint->disabled = FALSE; /* Edit this to true to make a default endpoint disabled initially */
+  $endpoint->api_version = 3;
+  $endpoint->label = 'UCenter OAuth Server';
+  $endpoint->name = 'ucenter_oauth_server';
+  $endpoint->server = 'rest_server';
+  $endpoint->path = 'oauth2';
+  $endpoint->authentication = array(
+    'oauth2_server' => array(
+      'server' => 'oauth2',
+    ),
+  );
+  $endpoint->server_settings = array(
+    'formatters' => array(
+      'bencode' => TRUE,
+      'json' => TRUE,
+      'jsonp' => TRUE,
+      'php' => TRUE,
+      'xml' => TRUE,
+    ),
+    'parsers' => array(
+      'application/json' => TRUE,
+      'application/vnd.php.serialized' => TRUE,
+      'application/x-www-form-urlencoded' => TRUE,
+      'application/xml' => TRUE,
+      'multipart/form-data' => TRUE,
+      'text/xml' => TRUE,
+    ),
+  );
+  $endpoint->resources = array(
+    'user' => array(
+      'operations' => array(
+        'retrieve' => array(
+          'enabled' => '1',
+          'settings' => array(
+            'oauth2_server' => array(
+              'require_authentication' => '1',
+              'scope' => 'user_profile',
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  $endpoint->debug = 0;
+  $endpoints[$endpoint->name] = $endpoint;
+
+  return $endpoints;
+}
+
+function ucenter_oauth_server_services_resources_alter(&$resources, &$endpoint) {
+    $resources['user']['operations']['retrieve']['callback'] = 'ucenter_oauth_server_services_user_retrieve_callback';
+    $resources['user']['operations']['retrieve']['access callback'] = 'ucenter_oauth_server_services_user_retrieve_access_callback';
+}
+
+function biketo_ucenter_user_retrieve_callback($uid){
+    global $user;
+    if($uid == 'current'){
+        $uid = $user->uid;
+    }
+    return _user_resource_retrieve($uid);
+}
+
+function ucenter_oauth_server_services_user_retrieve_access_callback($op = 'view', $args = array()){
+    if(isset($args[0]) && $args[0]=='current'){
+        return user_is_logged_in();
+    }
+
+    return _user_resource_access($op, $args);
+}
+
+
+
+function ucenter_oauth_server_services_user_retrieve_callback($uid){
+    global $user;
+    if($uid == 'current'){
+        $uid = $user->uid;
+    }
+    return _user_resource_retrieve($uid);
+}
+
+
+/**
+ * Implements hook_user_logout().
+ */
+function ucenter_oauth_server_user_logout($account) {
+  if (!isset($_SERVER['HTTP_REFERER']))  return;
+  if (!isset($_GET['token']))  return;
+
+  // Check that the referer is one of the registered hosts.
+  $http_referer = $_SERVER['HTTP_REFERER'];
+  $host = parse_url($http_referer, PHP_URL_HOST);
+  $token = $_GET['token'];
+  $client_hosts = _ucenter_oauth_server_get_client_hosts($token);
+  if (!in_array($host, $client_hosts))  return;
+
+  // Redirect back to the original page.
+  drupal_register_shutdown_function('_ucenter_oauth_server_redirect_to_the_original_page', $http_referer);
+}
+
+/**
+ * Return the registered hosts of the client that has the given token.
+ */
+function _ucenter_oauth_server_get_client_hosts($token) {
+  $client_ids = array();
+  $query = new EntityFieldQuery();
+  $entities = $query->entityCondition('entity_type', 'oauth2_server_token')
+    ->propertyCondition('type', 'access')
+    ->propertyCondition('token',  $token)
+    ->execute();
+  if (isset($entities['oauth2_server_token'])) {
+    $entity_ids = array_keys($entities['oauth2_server_token']);
+    $tokens = entity_load('oauth2_server_token', $entity_ids);
+    foreach ($tokens as $id => $token) {
+      $client_ids[] = $token->client_id;
+    }
+  }
+
+  $client_hosts = array();
+  $clients = entity_load('oauth2_server_client', $client_ids);
+  foreach ($clients as $id => $client) {
+    $client_hosts[] = parse_url($client->redirect_uri, PHP_URL_HOST);
+  }
+
+  return $client_hosts;
+}
+
+/**
+ * Redirect back to the original page.
+ */
+function _ucenter_oauth_server_redirect_to_the_original_page($url) {
+  drupal_goto($url);
+}

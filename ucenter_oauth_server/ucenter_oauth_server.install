@@ -1,0 +1,17 @@
+<?php
+/**
+ * @file
+ * Installation functions for ucenter_oauth_server.
+ */
+
+/**
+ * Implements hook_enable().
+ */
+function ucenter_oauth_server_enable() {
+  // Make sure that users have the permission to use the oauth2 server.
+  foreach (array('anonymous user', 'authenticated user') as $role_name) {
+    $role = user_role_load_by_name($role_name);
+    user_role_grant_permissions($role->rid, array('use oauth2 server'));
+  }
+}
+

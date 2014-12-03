@@ -1,0 +1,245 @@
+<?php
+
+function ucenter_oauth_client_menu() {
+  $items['admin/config/people/ucneteroauthclient'] = array(
+    'title' => t('Config UCenter OAuth Clients'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('ucenter_oauth_client_admin_settings'),
+    'access arguments' => array('administer ucenter oauth client'),
+    'type' => MENU_NORMAL_ITEM,
+    'file' => 'ucenter_oauth_client.admin.inc',
+    'description' => t('Config UCenter OAuth Clients'),
+    'position' => 'left',
+  );
+  $items['admin/config/people/ucneteroauthclient/config'] = array(
+    'title' => t('Config UCenter OAuth Clients'),
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -1,
+  );
+  $items['uoc/callback'] = array(
+    'title' => 'Log in',
+    'access callback' => 'user_is_anonymous',
+    'type' => MENU_CALLBACK,
+    'page callback' => 'ucenter_oauth_client_login_callback',
+  );
+  return $items;
+}
+
+
+function ucenter_oauth_client_menu_alter(&$items){
+  if(variable_get('ucenter_oauth_client_use', 0)){
+    $items['user/login'] = array(
+      'title' => 'Log in',
+      'access callback' => 'user_is_anonymous',
+      'type' => MENU_CALLBACK,
+      'page callback' => 'ucenter_oauth_client_login_redirect',
+    );
+  }
+}
+
+function ucenter_oauth_client_login_redirect(){
+  global $base_url;
+  
+  $state = ucenter_oauth_client_generate_state_code();
+  // go back to referer uri
+  if(isset($_SERVER['HTTP_REFERER']) && (preg_match("!^$base_url/!", $_SERVER['HTTP_REFERER']))){
+    $data = array(
+      'referer' => $_SERVER['HTTP_REFERER'],
+      'ip' => ip_address(),
+    );
+    cache_set('uoc_'.$state, $data, 'cache', REQUEST_TIME+600);
+  }
+  
+  $parameters = array(
+    'client_id' => variable_get('ucenter_oauth_client_id', ""),
+    'redirect_uri' => $base_url . url('uoc/callback'),
+    'response_type' => 'code',
+    'state' => $state,
+  );
+  drupal_goto(variable_get('ucenter_oauth_client_server', "").'oauth2/authorize', array('query' => $parameters));
+}
+
+function ucenter_oauth_client_login_callback(){
+  global $base_url, $user;
+  if(empty($_REQUEST['code'])){
+    drupal_set_message('网络错误，请稍后重试');
+    drupal_goto('');
+  }
+  if($user->uid){
+    drupal_goto('user');
+  }
+  
+  $parameters = array(
+    'client_id' => variable_get('ucenter_oauth_client_id', ""),
+    'client_secret' => variable_get('ucenter_oauth_client_secret', ""),
+    'grant_type' => 'authorization_code',
+    'redirect_uri' => $base_url . url('uoc/callback'),
+    'code' => $_REQUEST['code'],
+  );   
+
+  $param_data = array(
+    'method' => 'POST',
+    'data' => drupal_http_build_query($parameters),
+    'headers' => array(
+      'Content-Type' => 'application/x-www-form-urlencoded'
+    ),
+  );
+  $http = drupal_http_request(url(variable_get('ucenter_oauth_client_server', "").'oauth2/token'), $param_data);
+  $data = json_decode($http->data);
+  if(!isset($data->access_token)){
+    drupal_set_message('网络错误，请稍后重试');
+    drupal_goto('');
+  }
+  
+  $http = drupal_http_request(url(variable_get('ucenter_oauth_client_server', "").'oauth2/user/current.json', array('query' => array('access_token' => $data->access_token))));
+  $info = json_decode($http->data);
+
+  if (empty($info->uid)) {
+    drupal_set_message('网络错误，请稍后重试');
+    drupal_goto('');
+  }
+  if($account = user_load($info->uid)){ // login
+    //update user
+    
+  }
+  else if( $account = _ucenter_oauth_client_user_create($info) ){ // create user
+    
+  }
+  else{
+    drupal_set_message('网络错误，请稍后重试');
+    drupal_goto('');
+  }
+  $user = $account;
+  $form_state['uid'] = $user->uid;
+  $form_state['redirect'] = 'user/' . $user->uid;
+  if(!empty($_REQUEST['state'])){
+    $cache = cache_get('uoc_'.$_REQUEST['state']);
+    if($cache->data['ip']==ip_address() && isset($cache->data['referer'])){
+      $form_state['redirect'] = $cache->data['referer'];
+    }
+  }
+  user_login_finalize($form_state);
+  drupal_goto($form_state['redirect']);
+}
+
+
+
+/**
+ * user_save 的UCenter Plus版本，提供账号创建与绑定功能，用于创建用户
+ * name, mail, ucuid 为必填
+ */
+ 
+function _ucenter_oauth_client_user_create($info) {
+  $uid = $info->uid;
+  $edit = array(
+    'name' => $info->name,
+    'mail' => $info->mail,
+    'init' => $info->init,
+    'created' => $info->created,
+    'timezone' => $info->timezone,
+  );
+  $category = 'ucenter_oauth_client';
+  
+  // 如果用户已存在，则无法创建
+  if(user_load_by_name($edit['name'])
+    || user_load($uid)
+    || user_load_by_mail($edit['mail'])
+  ){
+    return FALSE;
+  }
+  
+  //密码初始化
+  if(empty($edit['pass'])){
+    $edit['pass'] = user_password();
+  }
+  if(empty($edit['init'])){
+    $edit['init'] = $edit['mail'];
+  }
+  if(!isset($edit['status'])){
+    $edit['status'] = TRUE;
+  }
+
+  $transaction = db_transaction();
+  try {
+    // Allow alternate password hashing schemes.
+    require_once DRUPAL_ROOT . '/' . variable_get('password_inc', 'includes/password.inc');
+    $edit['pass'] = user_hash_password(trim($edit['pass']));
+    // Abort if the hashing failed and returned FALSE.
+    if (!$edit['pass']) {
+      return FALSE;
+    }
+
+
+    $account = new stdClass();
+
+    $account->is_new = TRUE;
+ 
+    // Invoke hook_user_presave() for all modules.
+    user_module_invoke('presave', $edit, $account, $category);
+
+    // Invoke presave operations of Field Attach API and Entity API. Those APIs
+    // require a fully-fledged and updated entity object. Therefore, we need to
+    // copy any new property values of $edit into it.
+    foreach ($edit as $key => $value) {
+      $account->$key = $value;
+    }
+    field_attach_presave('user', $account);
+    module_invoke_all('entity_presave', $account, 'user');
+
+    
+    $account->uid = $uid;
+
+    if (!isset($account->created)) {
+      $account->created = REQUEST_TIME;
+    }
+    $success = drupal_write_record('users', $account);
+    if ($success === FALSE) {
+      // On a failed INSERT some other existing user's uid may be returned.
+      // We must abort to avoid overwriting their account.
+      return FALSE;
+    }
+
+    // Make sure $account is properly initialized.
+    $account->roles[DRUPAL_AUTHENTICATED_RID] = 'authenticated user';
+
+    field_attach_insert('user', $account);
+    $edit = (array) $account;
+    user_module_invoke('insert', $edit, $account, $category);
+    module_invoke_all('entity_insert', $account, 'user');
+
+    // Save user roles. Skip built-in roles, and ones that were already saved
+    // to the database during hook calls.
+    $rids_to_skip = array_merge(array(DRUPAL_ANONYMOUS_RID, DRUPAL_AUTHENTICATED_RID), db_query('SELECT rid FROM {users_roles} WHERE uid = :uid', array(':uid' => $account->uid))->fetchCol());
+    if ($rids_to_save = array_diff(array_keys($account->roles), $rids_to_skip)) {
+      $query = db_insert('users_roles')->fields(array('uid', 'rid'));
+      foreach ($rids_to_save as $rid) {
+        $query->values(array(
+          'uid' => $account->uid,
+          'rid' => $rid,
+        ));
+      }
+      $query->execute();
+    }
+    // Clear internal properties.
+    unset($account->is_new);
+    unset($account->original);
+    // Clear the static loading cache.
+    entity_get_controller('user')->resetCache(array($account->uid));
+
+    return $account;
+  }
+  catch (Exception $e) {
+    $transaction->rollback();
+    watchdog_exception('user', $e);
+    throw $e;
+  }
+}
+
+
+
+function ucenter_oauth_client_generate_state_code()
+{
+  $tokenLen = 40;
+  $randomData = mt_rand() . mt_rand() . mt_rand() . mt_rand() . microtime(true) . uniqid(mt_rand(), true);
+  return substr(hash('sha512', $randomData), 0, $tokenLen);
+}

@@ -1,0 +1,268 @@
+<?php
+
+function ucenter_plus_connect_menu() {
+  $items['upc/%ucenter_plus_connect_client'] = array(
+    'title' => 'UCenter Plus Connect Redirect',
+    'page callback' => 'ucenter_plus_connect_redirect',
+    'page arguments' => array(1),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['upc/%ucenter_plus_connect_client/callback'] = array(
+    'title' => 'UCenter Plus Connect Redirect',
+    'page callback' => 'ucenter_plus_connect_callback',
+    'page arguments' => array(1),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/config/people/upc'] = array(
+    'title' => t('Config UCenter Plus Connect Clients'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('ucenter_plus_connect_admin_settings'),
+    'access arguments' => array('administer ucenter plus connect'),
+    'type' => MENU_NORMAL_ITEM,
+    'file' => 'ucenter_plus_connect.admin.inc',
+    'description' => t('Config UCenter OAuth Clients'),
+    'position' => 'left',
+  );
+  $items['admin/config/people/upc/config'] = array(
+    'title' => t('Config UCenter Plus Connect Clients'),
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -1,
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_perm().
+ */
+function ucenter_plus_connect_permission() {
+  return array(
+    'administer ucenter plus connect' => array(
+      'title' => t('Administer UCenter Plus Connect'),
+      'description' => t('Config UCenter Plus Connect Clients.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function ucenter_plus_connect_form_alter(&$form, &$form_state, $form_id) {
+ 
+  if ($form_id == 'user_login' || $form_id == 'user_login_block' || $form_id == 'user_register_form') {
+    
+    // if we hava authmap info
+    // we use ucenter_plus module to save authmap
+    if(isset($_REQUEST['state'])){
+      $cache = cache_get('upc_'.$_REQUEST['state']);
+      dsm($cache);
+      if($cache && ($cache->data['ip']==ip_address()) && ($cache->created+600 > REQUEST_TIME)){
+        drupal_set_message(t('Please complete your personal information.'));
+        $form['authmap_client'] = array('#type' => 'value', '#value' => $cache->data['client']);
+        $form['authmap_uid'] = array('#type' => 'value', '#value' => $cache->data['uid']);
+        if(empty($form['account']['name']['#default_value'])){
+          $form['account']['name']['#default_value'] = $cache->data['name'];
+        }
+        if(!empty($cache->data['email'])){
+          $form['account']['mail']['#default_value'] = $cache->data['email'];
+        }
+      }
+      
+    }
+    else{
+      $clients = ucenter_plus_connect_get_clients();
+      $client_icons = theme('ucenter_plus_connect_clients', $clients);
+      if (isset($form['submitted']['user_login_block']['#suffix']) && !empty($form['submitted']['user_login_block']['#suffix'])) {
+        $form['submitted']['user_login_block']['#suffix'] .= $client_icons;
+      }
+      else {
+        $form['submitted']['user_login_block']['#suffix'] = $client_icons;
+      }
+    }
+  }
+}
+
+
+/**
+ * Implements hook_theme().
+ */
+function ucenter_plus_connect_theme($existing, $type, $theme, $path) {
+  return array(
+    'ucenter_plus_connect_clients' => array(
+      'arguments' => array('clients' => array()),
+    ),
+  );
+}
+
+
+function theme_ucenter_plus_connect_clients($clients) {
+  $items = array();
+  if(empty($clients)){
+    return '';
+  }
+  $url_options = array(
+    'html' => TRUE
+  );
+
+  if (isset($_GET['destination'])) {
+    $url_options['query'] = array('destination' => $_GET['destination']);
+  }
+  foreach ($clients as $client_id => $client) {
+    if(!is_array($client) || empty($client['enabled'])){
+      continue;
+    }
+    $img = array(
+      'title' => $client['title'],
+      'path' => $client['path'] . '/' . $client['icon'],
+      'alt' => $client['title'],
+      'attributes' => array()
+    );
+    $items[] = l( theme_image($img) , 'upc/' . $client_id, $url_options);
+  }
+  return theme('item_list', array('items' => $items, 'attributes'=>array('class'=>'ucenter-plus-connect-icons')));
+}
+
+/**
+ * Implementation of hook_ctools_plugin_directory
+ */
+function ucenter_plus_connect_ctools_plugin_directory($module, $plugin) {
+  if ($module == 'ctools' || $module == 'ucenter_plus_connect') {
+    return 'plugins/' . $plugin;
+  }
+}
+/**
+ * Implementation of hook_ctools_plugin_type()
+ * Provide topic_render plugin type
+ */
+function ucenter_plus_connect_ctools_plugin_type() {
+  $plugins['ucenter_connect_client'] = array(
+  );
+  return $plugins;
+}
+
+/**
+ * Get all ucenter_connect_client plugins
+ */
+function ucenter_plus_connect_get_clients() {
+  global $base_url;
+  ctools_include('plugins');
+  $clients = ctools_get_plugins('ucenter_plus_connect', 'ucenter_connect_client');
+  foreach($clients as $key => $val){
+    $clients[$key]['enabled'] = variable_get('upc_client_' . $key . '_enabled', 0);
+    $clients[$key]['client_id'] = variable_get('upc_client_' . $key . '_client_id', '');
+    $clients[$key]['client_secret'] = variable_get('upc_client_' . $key . '_client_secret', '');
+    $clients[$key]['redirect_uri'] = $base_url . url('upc/' . $key . '/callback');
+  }
+  return $clients;
+}
+
+function ucenter_plus_connect_client_load($clientid) {
+  $clients = ucenter_plus_connect_get_clients();
+  return isset($clients[$clientid]) ? $clients[$clientid] : FALSE;
+}
+
+function ucenter_plus_connect_redirect($client){
+  
+  if(empty($client['enabled'])){
+    drupal_set_message(t('Connect client not enabled.'), 'error');
+    return '';
+  }
+  $state = ucenter_plus_connect_generate_state_code();
+  $data = array();
+  $data['ip'] = ip_address();
+
+  if (isset($_GET['destination'])) {
+    if(!url_is_external($_GET['destination'])){
+      $data['destination'] = $_GET['destination']; 
+    }
+  }
+  cache_set('upc_'.$state, $data, 'cache', REQUEST_TIME+600);
+  $parameters = array(
+    'client_id' => $client['client_id'],
+    'redirect_uri' => $client['redirect_uri'],
+    'response_type' => 'code',
+    'state' => $state
+  );
+  $url = url($client['authorize_uri'], array('query' => $parameters));
+  header('Location: ' . $url, TRUE, 302);
+  drupal_exit($url);
+}
+
+function ucenter_plus_connect_callback($client){
+  global $user;
+
+  if(empty($client['callback'])){
+    drupal_set_message(t('Connect client not configured.'), 'error');
+    drupal_goto('user');
+  }
+  if(empty($_REQUEST['code'])){
+    drupal_goto('user');
+  }
+  
+  $data = call_user_func($client['callback'], $client, $_REQUEST);
+  $state = isset($_REQUEST['state']) ? $_REQUEST['state'] : ucenter_plus_connect_generate_state_code();
+
+  if (isset($data['access_token'])) {
+    /* register data set */
+    $cache = cache_get('upc_'.$state);
+    if(isset($cache->data['destination'])){
+      $data['destination'] = $cache->data['destination']; 
+      $data['ip'] = $cache->data['ip'];
+    }
+    $data['client'] = $client['name'];
+    cache_set('upc_'.$state, $data, 'cache', REQUEST_TIME+600);
+    $identity = $client['name'] . '_' . $data['uid'];
+    $account = user_external_load($identity);
+
+    if (!isset($account->uid)) { // we don't hava user
+      if($user->uid){
+        user_set_authmaps($user, array('authname_upc' => $identity));
+      }
+      else {
+        $query = array('state'=>$state);
+        if(isset($data['destination']) && !url_is_external($data['destination'])){
+          $query['destination'] = $data['destination'];
+        }
+        drupal_goto('user/register', array('query'=> $query));
+      }
+    }
+    else{
+      ucenter_plus_connect_execute_user_login($account, $data);
+    }
+    if(isset($data['destination']) && !url_is_external($data['destination'])){
+      drupal_goto($data['destination']);
+    }
+    else{
+      drupal_goto('user/'.$user->uid);
+    }
+  }
+  else{
+    drupal_set_message('OAuth login failed.');
+    drupal_goto('user');
+  }
+}
+
+/**
+ * Helper function for CSNA Callback.
+ *
+ * It executes user login after returning from provider's authentication page.
+ * If no valid account is found or authentication with providers failed, this
+ * function returns FALSE.
+ */
+function ucenter_plus_connect_execute_user_login($account, $data=array()) {
+  if (empty($account) OR !isset($account->uid)) {
+    return FALSE;
+  }
+  $form_state['uid'] = $account->uid;
+  user_login_submit(array(), $form_state);
+  return TRUE;
+}
+
+function ucenter_plus_connect_generate_state_code()
+{
+  $tokenLen = 40;
+  $randomData = mt_rand() . mt_rand() . mt_rand() . mt_rand() . microtime(true) . uniqid(mt_rand(), true);
+  return substr(hash('sha512', $randomData), 0, $tokenLen);
+}
+

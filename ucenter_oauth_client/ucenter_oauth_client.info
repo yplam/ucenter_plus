@@ -1,0 +1,7 @@
+name = "UCenter OAuth Client"
+description = "UCenter Plus connect with UCenter OAuth2 Servers."
+core = "7.x"
+package = "Authentication"
+version = "7.x-1.0"
+
+configure = admin/config/people/ucenteroauthclient/config
