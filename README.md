@@ -1,6 +1,8 @@
 UCenter Plus
 ============
 
+请注意：此模块为个人测试模块，因为现在已经用不到，所以在此开源，某些功能为针对自己的特殊要求定制，使用前请先阅读代码。如有疑问，请联系yplam#yplam.com
+
 使用Drupal整合与扩展常用的UCenter用户中心，提供OAuth2 Client与OAuth2 Server功能
 
 可以跟已有的UCenter系统进行无缝整合，UCenter Plus 以UCenter App的形式存在，当用户登陆UCenter，UCenter Plus中将创建一个具有相同ID的用户。同理，在UCenter Plus中注册，也会自动同步到UCenter。
